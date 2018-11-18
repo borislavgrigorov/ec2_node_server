@@ -12,6 +12,7 @@ log.txt
 .vscode/
 npm-debug.log*
 terraform.tfvars
+*.tfstate*
 
 .idea/
 .sass-cache/

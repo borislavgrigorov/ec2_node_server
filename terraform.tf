@@ -5,14 +5,29 @@
 variable "aws_access_key" {}
 variable "aws_secret_key" {}
 variable "private_key_path" {}
+
 variable "key_name" {
   default = "aws_key"
 }
+
 variable "network_address_space" {
   default = "10.1.0.0/16"
 }
-variable "subnet1_address_space" {
-  default = "10.1.0.0/24"
+
+variable "project_tag" {
+  default = "terraform_ec2_test_project"
+}
+
+variable "environment_tag" {
+  default = "dev"
+}
+
+variable "instance_count" {
+  default = 1
+}
+
+variable "subnet_count" {
+  default = 1
 }
 
 ##################################################################################
@@ -37,21 +52,40 @@ data "aws_availability_zones" "available" {}
 
 # NETWORKING #
 resource "aws_vpc" "vpc" {
-  cidr_block = "${var.network_address_space}"
+  cidr_block           = "${var.network_address_space}"
   enable_dns_hostnames = "true"
 
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-vpc"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
 }
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = "${aws_vpc.vpc.id}"
 
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-igw"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
 }
 
-resource "aws_subnet" "subnet1" {
-  cidr_block        = "${var.subnet1_address_space}"
-  vpc_id            = "${aws_vpc.vpc.id}"
+resource "aws_subnet" "subnet" {
+  count = "${var.subnet_count}"
+
+  # Creates the necessary subnets
+  cidr_block              = "${cidrsubnet(var.network_address_space, 8, count.index + 1)}"
+  vpc_id                  = "${aws_vpc.vpc.id}"
   map_public_ip_on_launch = "true"
-  availability_zone = "${data.aws_availability_zones.available.names[0]}"
+  availability_zone       = "${data.aws_availability_zones.available.names[count.index]}"
+
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-subnet-${count.index + 1}"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
 }
 
 # ROUTING #
@@ -62,25 +96,25 @@ resource "aws_route_table" "rtb" {
     cidr_block = "0.0.0.0/0"
     gateway_id = "${aws_internet_gateway.igw.id}"
   }
+
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-rtb"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
 }
 
-resource "aws_route_table_association" "rta-subnet1" {
-  subnet_id      = "${aws_subnet.subnet1.id}"
+resource "aws_route_table_association" "rta-subnet" {
+  count          = "${var.subnet_count}"
+  subnet_id      = "${element(aws_subnet.subnet.*.id, count.index)}"
   route_table_id = "${aws_route_table.rtb.id}"
 }
 
 # SECURITY GROUPS #
-resource "aws_security_group" "security-group" {
-  name        = "security-group"
-  vpc_id      = "${aws_vpc.vpc.id}"
-
-  # SSH access from anywhere
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+# Elastic load balancer security group
+resource "aws_security_group" "elb-sg" {
+  name   = "elb-sg"
+  vpc_id = "${aws_vpc.vpc.id}"
 
   # HTTP access from anywhere
   ingress {
@@ -97,18 +131,82 @@ resource "aws_security_group" "security-group" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-elb-sg"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
 }
 
-##################################################################################
-# RESOURCES
-##################################################################################
+# Instance security group
+resource "aws_security_group" "instance-sg" {
+  name   = "instance-sg"
+  vpc_id = "${aws_vpc.vpc.id}"
 
-resource "aws_instance" "tf-instance" {
-  ami           = "ami-061e7ebbc234015fe"
-  instance_type = "t2.nano"
-  subnet_id     = "${aws_subnet.subnet1.id}"
-  vpc_security_group_ids = ["${aws_security_group.security-group.id}"]
-  key_name        = "${var.key_name}"
+  # SSH access from anywhere
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # HTTP access from the VPC
+  ingress {
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+
+    # this restricts http access to addresses in our VPC which belongs to our network address space
+    cidr_blocks = ["${var.network_address_space}"]
+  }
+
+  # outbound internet access
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-instance-sg"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
+}
+
+# LOAD BALANCER #
+resource "aws_elb" "web" {
+  name = "web-elb"
+
+  subnets         = ["${aws_subnet.subnet.*.id}"]
+  security_groups = ["${aws_security_group.elb-sg.id}"]
+  instances       = ["${aws_instance.instance.*.id}"]
+
+  listener {
+    instance_port     = 80
+    instance_protocol = "http"
+    lb_port           = 80
+    lb_protocol       = "http"
+  }
+
+  tags {
+    Name        = "${var.project_tag}-${var.environment_tag}-elb"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
+  }
+}
+
+# INSTANCES #
+resource "aws_instance" "instance" {
+  count                  = "${var.instance_count}"
+  ami                    = "ami-061e7ebbc234015fe"
+  instance_type          = "t2.nano"
+  subnet_id              = "${element(aws_subnet.subnet.*.id, count.index % var.subnet_count)}"
+  vpc_security_group_ids = ["${aws_security_group.instance-sg.id}"]
+  key_name               = "${var.key_name}"
 
   connection {
     user        = "ec2-user"
@@ -116,13 +214,16 @@ resource "aws_instance" "tf-instance" {
   }
 
   tags {
-    Name = "tf-instance"
+    Name        = "${var.project_tag}-${var.environment_tag}-instance-${count.index + 1}"
+    Project     = "${var.project_tag}"
+    Environment = "${var.environment_tag}"
   }
 
   provisioner "remote-exec" {
     inline = [
       "sudo amazon-linux-extras install nginx1.12 -y",
-      "sudo service nginx start"
+      "sudo service nginx start",
+      "echo '<html><head><title>Server</title></head><body><p style=\"text-align: center;\"><span><span style=\"font-size:28px;\">Instance: ${count.index}</span></span></p></body></html>' | sudo tee /usr/share/nginx/html/index.html",
     ]
   }
 }
@@ -131,6 +232,6 @@ resource "aws_instance" "tf-instance" {
 # OUTPUT
 ##################################################################################
 
-output "aws_instance_public_dns" {
-    value = "${aws_instance.tf-instance.public_dns}"
+output "aws_elb_public_dns" {
+  value = "${aws_elb.web.dns_name}"
 }
