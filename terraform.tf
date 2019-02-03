@@ -2,9 +2,8 @@
 # VARIABLES
 ##################################################################################
 
-variable "aws_access_key" {}
-variable "aws_secret_key" {}
-variable "private_key_path" {}
+variable "aws_private_key_file_path" {}
+variable "ec2_user" {}
 
 variable "key_name" {
   default = "aws_key"
@@ -34,11 +33,7 @@ variable "subnet_count" {
 # PROVIDERS
 ##################################################################################
 
-provider "aws" {
-  access_key = "${var.aws_access_key}"
-  secret_key = "${var.aws_secret_key}"
-  region     = "us-west-2"
-}
+provider "aws" {}
 
 ##################################################################################
 # DATA
@@ -209,8 +204,8 @@ resource "aws_instance" "instance" {
   key_name               = "${var.key_name}"
 
   connection {
-    user        = "ec2-user"
-    private_key = "${file(var.private_key_path)}"
+    user        = "${var.ec2_user}"
+    private_key = "${file(var.aws_private_key_file_path)}"
   }
 
   tags {
